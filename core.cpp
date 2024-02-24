@@ -4,6 +4,9 @@
 #include <QMqttClient>
 #include <QtGlobal>
 #include <QHostInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QTimer>
 
 #include <KConfig>
 #include <KSharedConfig>
@@ -12,36 +15,48 @@
 #include "core.h"
 #include "components.h"
 
+HaControl *HaControl::s_self = nullptr;
+
+// core internal sensor
+class ConnectedNode: public Entity
+{
+    Q_OBJECT
+public:
+    ConnectedNode(QObject *parent);
+    ~ConnectedNode();
+};
 
 HaControl::HaControl() {
     s_self = this;
     auto config = KSharedConfig::openConfig();
-    qDebug() << config->name();
     auto group = config->group("general");
     m_client = new QMqttClient(this);
     m_client->setHostname(group.readEntry("host"));
     m_client->setPort(group.readEntry("port", 1883));
     m_client->setUsername(group.readEntry("user"));
     m_client->setUsername(group.readEntry("password"));
+    m_client->setKeepAlive(3); // set a low ping so we become unavailable on suspend quickly
 
-           //read from config for enable or not
-    new ConnectedNode(m_client, this);
-    new ActiveSensor(m_client, this);
-    new Notifications(m_client, this);
-    new SuspendSwitch(m_client, this);
-    new LockedState(m_client, this);
+    //TODO read from config for enable or not
 
-    auto connectToHost = [this]() {
-        // if(m_networkConfigurationManager.isOnline()) {
+    new ConnectedNode(this);
+
+           // these are faux plugins, there doesn't have to be a 1:1 relationship between it and an entity
+           // there just is for now
+    new ActiveSensor(this);
+    new Notifications(this);
+    new SuspendSwitch(this);
+    new LockedState(this);
+
+    QTimer *reconnectTimer = new QTimer(this);
+    reconnectTimer->setInterval(1000);
+    connect(reconnectTimer, &QTimer::timeout, this, [this]() {
         m_client->connectToHost();
-        // }
-    };
-
-
+    });
            //
            // connect(&m_networkConfigurationManager, &QNetworkConfigurationManager::configurationChanged, this, connectToHost);
            //
-    connect(m_client, &QMqttClient::stateChanged, this, [](QMqttClient::ClientState state) {
+    connect(m_client, &QMqttClient::stateChanged, this, [this, reconnectTimer](QMqttClient::ClientState state) {
         switch (state) {
         case QMqttClient::Connected:
             qDebug() << "connected";
@@ -51,12 +66,13 @@ HaControl::HaControl() {
             break;
         case QMqttClient::Disconnected:
             qDebug() << "disconnected";
+            reconnectTimer->start();
             //do I need to reconnect?
             break;
         }
     });
 
-    connectToHost();
+    m_client->connectToHost();
 }
 
 HaControl::~HaControl()
@@ -65,14 +81,9 @@ HaControl::~HaControl()
 
 static QString s_discoveryPrefix = "homeassistant";
 
-Entity::Entity(QMqttClient *client, QObject *parent):
-    QObject(parent),
-    m_client(client)
+Entity::Entity(QObject *parent):
+    QObject(parent)
 {
-    connect(m_client, &QMqttClient::connected, this, [this]() {
-        sendRegistration();
-        setInitialState();
-    });
 }
 
 QString Entity::hostname() const
@@ -85,9 +96,44 @@ QString Entity::baseTopic() const
     return hostname() + "/" + id();
 }
 
-QMqttClient *Entity::client() const
+void Entity::setHaConfig(const QVariantMap &newHaConfig)
 {
-    return m_client;
+    m_haConfig = newHaConfig;
+}
+
+QString Entity::haType() const
+{
+    return m_haType;
+}
+
+void Entity::setHaType(const QString &newHaType)
+{
+    m_haType = newHaType;
+}
+
+QString Entity::name() const
+{
+    return m_name;
+}
+
+void Entity::setDiscoveryConfig(const QString &key, const QVariant &value)
+{
+    m_haConfig[key] = value;
+}
+
+void Entity::setName(const QString &newName)
+{
+    m_name = newName;
+}
+
+QString Entity::id() const
+{
+    return m_id;
+}
+
+void Entity::setId(const QString &newId)
+{
+    m_id = newId;
 }
 
 void Entity::sendRegistration()
@@ -95,11 +141,10 @@ void Entity::sendRegistration()
     if (haType().isEmpty()) {
         return;
     }
-    QVariantMap config = haConfig();
+    QVariantMap config = m_haConfig;
     config["name"] = name();
-    //TODO the new HA device crap
 
-    if (haSetAvailability()) {
+    if (id() != "connected") { //special case
         config["availability_topic"] = hostname() + "/connected";
         config["payload_available"] = "on";
         config["payload_not_available"] = "off";
@@ -107,24 +152,120 @@ void Entity::sendRegistration()
     config["device"] = QVariantMap({{"identifiers", "linux_ha_bridge_" + hostname() }});
     config["unique_id"] = "linux_ha_control_"+ hostname() + "_" + id();
 
-    qDebug() <<  s_discoveryPrefix + "/" + haType() + "/" + hostname() + "/" + id() + "/config" << config;
-    m_client->publish(s_discoveryPrefix + "/" + haType() + "/" + hostname() + "/" + id() + "/config", QJsonDocument(QJsonObject::fromVariantMap(config)).toJson(QJsonDocument::Compact), 0, true);
+    HaControl::mqttClient()->publish(s_discoveryPrefix + "/" + haType() + "/" + hostname() + "/" + id() + "/config", QJsonDocument(QJsonObject::fromVariantMap(config)).toJson(QJsonDocument::Compact), 0, true);
 }
 
-ConnectedNode::ConnectedNode(QMqttClient *c, QObject *parent):
-    Entity(c, parent)
+
+ConnectedNode::ConnectedNode(QObject *parent):
+    Entity(parent)
 {
+    setId("connected");
+    setName("Connected");
+    setHaType("binary_sensor");
+    setHaConfig({
+        {"state_topic", baseTopic()},
+        {"payload_on", "on"},
+        {"payload_off", "off"},
+        {"device_class", "power"},
+        {"device", QVariantMap({
+                       {"name", hostname() },
+                       {"identifiers", "linux_ha_bridge_" + hostname() },
+                       {"sw_version", "0.1"},
+                       {"manufacturer", "Linux HA Bridge"},
+                       {"model", "Linux"}
+                   })}
+    });
+
+    auto c = HaControl::mqttClient();
     c->setWillTopic(baseTopic());
     c->setWillMessage("off");
     c->setWillRetain(true);
+
+    connect(HaControl::mqttClient(), &QMqttClient::connected, this, [this]() {
+        sendRegistration();
+        HaControl::mqttClient()->publish(baseTopic(), "on", 0, false);
+    });
 }
 
 ConnectedNode::~ConnectedNode()
 {
-    client()->publish(baseTopic(), "off");
+    HaControl::mqttClient()->publish(baseTopic(), "off", 0, false);
 }
 
-void ConnectedNode::setInitialState()
+Button::Button(QObject *parent)
+    : Entity(parent)
 {
-    client()->publish(baseTopic(), "on");
+    setHaType("button");
+    setHaConfig({
+        {"command_topic", baseTopic()}
+    });
+    connect(HaControl::mqttClient(), &QMqttClient::connected, this, [this]() {
+        sendRegistration();
+        qDebug() << "connect to button" << baseTopic();
+        m_subscription.reset(HaControl::mqttClient()->subscribe(baseTopic()));
+        connect(m_subscription.data(), &QMqttSubscription::messageReceived, this, &Button::triggered);
+    });
 }
+
+Switch::Switch(QObject *parent)
+    : Entity(parent)
+{
+    setHaType("switch");
+    setHaConfig({
+        {"state_topic", baseTopic()},
+        {"command_topic", baseTopic() + "/set"},
+        {"payload_on", "true"},
+        {"payload_off", "false"}
+    });
+
+    connect(HaControl::mqttClient(), &QMqttClient::connected, this, [this]() {
+        sendRegistration();
+        setState(m_state);
+
+        qDebug() << "registering switch";
+
+        m_subscription.reset(HaControl::mqttClient()->subscribe(baseTopic() + "/set"));
+        connect(m_subscription.data(), &QMqttSubscription::messageReceived, this, [this](QMqttMessage message) {
+            if (message.payload() == "true") {
+                Q_EMIT stateChangeRequested(true);
+            } else if (message.payload() == "false") {
+                Q_EMIT stateChangeRequested(false);
+            } else {
+                qWarning() << "unknown state request" << message.payload();
+            }
+        });
+    });
+}
+
+void Switch::setState(bool state)
+{
+    m_state = state;
+    if (HaControl::mqttClient()->state() == QMqttClient::Connected) {
+        HaControl::mqttClient()->publish(baseTopic(), state ? "true" : "false", 0, true);
+    }
+}
+
+BinarySensor::BinarySensor(QObject *parent)
+    : Entity(parent)
+{
+    setHaType("binary_sensor");
+    setHaConfig({
+        {"state_topic", baseTopic()},
+        {"payload_on", "true"},
+        {"payload_off", "false"}
+    });
+    connect(HaControl::mqttClient(), &QMqttClient::connected, this, [this]() {
+        sendRegistration();
+        setState(m_state);
+    });
+}
+
+void BinarySensor::setState(bool state)
+{
+    m_state = state;
+    if (HaControl::mqttClient()->state() == QMqttClient::Connected) {
+        HaControl::mqttClient()->publish(baseTopic(), state ? "true" : "false", 0, true);
+    }
+}
+
+#include "core.moc"

@@ -4,17 +4,17 @@
 #include <QtGlobal>
 // #include <QNetworkConfigurationManager>
 
-
+#include <KConfig>
+#include <KSharedConfig>
+#include <KConfigGroup>
 
 #include "core.h"
-#include "components.h"
-
 
 int main(int argc, char ** argv)
 {
     //TODO app name and stuff
     QApplication app(argc, argv);
-    HaControl client;
+    HaControl appControl;
     app.exec();
 }
 

@@ -12,12 +12,14 @@
 #include "login1_manager_interface.h"
 
 
-
-Notifications::Notifications(QMqttClient *c, QObject *parent):
-    Entity(c, parent)
+Notifications::Notifications(QObject *parent):
+    Entity(parent)
 {
-    connect(c, &QMqttClient::connected, this, [this]() {
-        auto watcher = client()->subscribe(baseTopic());
+    setId("notifications");
+    setName("Notifications");
+
+    connect(HaControl::mqttClient(), &QMqttClient::connected, this, [this]() {
+        auto watcher = HaControl::mqttClient()->subscribe(baseTopic());
         connect(watcher, &QMqttSubscription::messageReceived, this, &Notifications::notificationCallback);
     });
 }
@@ -31,61 +33,62 @@ void Notifications::notificationCallback(const QMqttMessage &message)
     KNotification::event(KNotification::Notification, title, body);
 }
 
-ActiveSensor::ActiveSensor(QMqttClient *c, QObject *parent):
-    Entity(c, parent)
+ActiveSensor::ActiveSensor(QObject *parent):
+    BinarySensor(parent)
 {
+    setId("active");
+    setName("Active");
+    setHaType("binary_sensor");
+    setDiscoveryConfig("device_class", "presence");
+
     auto kidletime = KIdleTime::instance();
     auto id = kidletime->addIdleTimeout(5 * 60 * 1000);
     connect(kidletime, &KIdleTime::resumingFromIdle, this, [this]() {
-        client()->publish(baseTopic(), "active");
+        setState(true);
     });
     connect(kidletime, &KIdleTime::timeoutReached, this, [this, id, kidletime](int _id) {
         if (_id != id) {
             return;
         }
-        client()->publish(baseTopic(), "idle");
+        setState(false);
         kidletime->catchNextResumeEvent();
     });
+    setState(true);
 }
 
-void ActiveSensor::setInitialState()
+SuspendSwitch::SuspendSwitch(QObject *parent)
+    : Button(parent)
 {
-    client()->publish(baseTopic(), "active");
-}
+    setId("suspend");
+    setName("Suspend");
 
-SuspendSwitch::SuspendSwitch(QMqttClient *client, QObject *parent)
-    : Entity(client, parent)
-{
-    connect(client, &QMqttClient::connected, this, [this]() {
-        auto watcher = this->client()->subscribe(baseTopic());
-        connect(watcher, &QMqttSubscription::messageReceived, this, []() {
-            OrgFreedesktopLogin1ManagerInterface logind(QStringLiteral("org.freedesktop.login1"),
-                                                        QStringLiteral("/org/freedesktop/login1"),
-                                                        QDBusConnection::systemBus());
-
-            logind.Suspend(true).waitForFinished();
-        });
+    connect(this, &Button::triggered, this, []() {
+        qDebug() << "suspend triggered";
+        OrgFreedesktopLogin1ManagerInterface logind(QStringLiteral("org.freedesktop.login1"),
+                                                    QStringLiteral("/org/freedesktop/login1"),
+                                                    QDBusConnection::systemBus());
+        logind.Suspend(true).waitForFinished();
     });
 }
 
-LockedState::LockedState(QMqttClient *client, QObject *parent)
-    : Entity(client, parent)
+LockedState::LockedState(QObject *parent)
+    : Switch(parent)
 {
+    setId("locked");
+    setName("Locked");
+    setHaType("switch");
+
+    setDiscoveryConfig("device_class", "lock");
+
+
     QDBusConnection::sessionBus().connect(QStringLiteral("org.freedesktop.ScreenSaver"),
                                           QStringLiteral("/ScreenSaver"),
                                           QStringLiteral("org.freedesktop.ScreenSaver"),
                                           QStringLiteral("ActiveChanged"),
                                           this, SLOT(screenLockedChanged(bool)));
 
-    connect(client, &QMqttClient::connected, this, [this]() {
-        auto watcher = this->client()->subscribe(baseTopic() + "/set");
-        connect(watcher, &QMqttSubscription::messageReceived, this, &LockedState::screenLockStateRequested);
-    });
+    connect(this, &Switch::stateChangeRequested, this, &LockedState::stateChangeRequested);
 
-}
-
-void LockedState::setInitialState()
-{
     auto isLocked = QDBusMessage::createMethodCall("org.freedesktop.ScreenSaver",
                                    "/ScreenSaver",
                                    "org.freedesktop.ScreenSaver",
@@ -93,26 +96,23 @@ void LockedState::setInitialState()
     auto pendingCall = QDBusConnection::sessionBus().asyncCall(isLocked);
     pendingCall.waitForFinished();
     bool locked = pendingCall.reply().arguments().at(0).toBool();
-    screenLockedChanged(locked);
+    setState(locked);
 }
 
 void LockedState::screenLockedChanged(bool active)
 {
-    if (active) {
-        client()->publish(baseTopic(), "locked");
-    } else {
-        client()->publish(baseTopic(), "unlocked");
-    }
+    setState(active);
 }
 
-void LockedState::screenLockStateRequested(const QMqttMessage &message)
+void LockedState::stateChangeRequested(bool state)
 {
-    OrgFreedesktopLogin1ManagerInterface login1Session(QStringLiteral("org.freedesktop.login1"),
-                                                 QStringLiteral("/org/freedesktop/session/auto"),
-                                                 QDBusConnection::systemBus());
-    if (message.payload() == "locked") {
-        // login1Session.Lock();
-    } else if (message.payload() == "unlocked") {
-        // login1Session.Unlock();
-    }
+    //     OrgFreedesktopLogin1ManagerInterface login1Session(QStringLiteral("org.freedesktop.login1"),
+    //                                                  QStringLiteral("/org/freedesktop/session/auto"),
+    //                                                  QDBusConnection::systemBus());
+    //     if (message.payload() == "locked") {
+    //         // login1Session.Lock();
+    //     } else if (message.payload() == "unlocked") {
+    //         // login1Session.Unlock();
+    //     }
 }
+
