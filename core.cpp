@@ -41,8 +41,6 @@ HaControl::HaControl() {
 
     new ConnectedNode(this);
 
-           // these are faux plugins, there doesn't have to be a 1:1 relationship between it and an entity
-           // there just is for now
     new ActiveSensor(this);
     new Notifications(this);
     new SuspendSwitch(this);
@@ -84,6 +82,7 @@ static QString s_discoveryPrefix = "homeassistant";
 Entity::Entity(QObject *parent):
     QObject(parent)
 {
+    connect(HaControl::mqttClient(), &QMqttClient::connected, this, &Entity::init);
 }
 
 QString Entity::hostname() const
@@ -135,6 +134,9 @@ void Entity::setId(const QString &newId)
 {
     m_id = newId;
 }
+
+void Entity::init()
+{}
 
 void Entity::sendRegistration()
 {
@@ -195,22 +197,27 @@ ConnectedNode::~ConnectedNode()
 Button::Button(QObject *parent)
     : Entity(parent)
 {
+}
+
+void Button::init()
+{
     setHaType("button");
     setHaConfig({
         {"command_topic", baseTopic()}
     });
-    connect(HaControl::mqttClient(), &QMqttClient::connected, this, [this]() {
-        sendRegistration();
-        qDebug() << "connect to button" << baseTopic();
-        m_subscription.reset(HaControl::mqttClient()->subscribe(baseTopic()));
-        connect(m_subscription.data(), &QMqttSubscription::messageReceived, this, &Button::triggered);
-    });
+    sendRegistration();
+    m_subscription.reset(HaControl::mqttClient()->subscribe(baseTopic()));
+    connect(m_subscription.data(), &QMqttSubscription::messageReceived, this, &Button::triggered);
 }
 
 Switch::Switch(QObject *parent)
     : Entity(parent)
 {
     setHaType("switch");
+}
+
+void Switch::init()
+{
     setHaConfig({
         {"state_topic", baseTopic()},
         {"command_topic", baseTopic() + "/set"},
@@ -218,22 +225,18 @@ Switch::Switch(QObject *parent)
         {"payload_off", "false"}
     });
 
-    connect(HaControl::mqttClient(), &QMqttClient::connected, this, [this]() {
-        sendRegistration();
-        setState(m_state);
+    sendRegistration();
+    setState(m_state);
 
-        qDebug() << "registering switch";
-
-        m_subscription.reset(HaControl::mqttClient()->subscribe(baseTopic() + "/set"));
-        connect(m_subscription.data(), &QMqttSubscription::messageReceived, this, [this](QMqttMessage message) {
-            if (message.payload() == "true") {
-                Q_EMIT stateChangeRequested(true);
-            } else if (message.payload() == "false") {
-                Q_EMIT stateChangeRequested(false);
-            } else {
-                qWarning() << "unknown state request" << message.payload();
-            }
-        });
+    m_subscription.reset(HaControl::mqttClient()->subscribe(baseTopic() + "/set"));
+    connect(m_subscription.data(), &QMqttSubscription::messageReceived, this, [this](QMqttMessage message) {
+        if (message.payload() == "true") {
+            Q_EMIT stateChangeRequested(true);
+        } else if (message.payload() == "false") {
+            Q_EMIT stateChangeRequested(false);
+        } else {
+            qWarning() << "unknown state request" << message.payload();
+        }
     });
 }
 
@@ -248,16 +251,18 @@ void Switch::setState(bool state)
 BinarySensor::BinarySensor(QObject *parent)
     : Entity(parent)
 {
+}
+
+void BinarySensor::init()
+{
     setHaType("binary_sensor");
     setHaConfig({
         {"state_topic", baseTopic()},
         {"payload_on", "true"},
         {"payload_off", "false"}
     });
-    connect(HaControl::mqttClient(), &QMqttClient::connected, this, [this]() {
-        sendRegistration();
-        setState(m_state);
-    });
+    sendRegistration();
+    setState(m_state);
 }
 
 void BinarySensor::setState(bool state)

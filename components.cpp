@@ -34,36 +34,34 @@ void Notifications::notificationCallback(const QMqttMessage &message)
 }
 
 ActiveSensor::ActiveSensor(QObject *parent):
-    BinarySensor(parent)
+    QObject(parent)
 {
-    setId("active");
-    setName("Active");
-    setHaType("binary_sensor");
-    setDiscoveryConfig("device_class", "presence");
+    m_sensor.setId("active");
+    m_sensor.setName("Active");
+    m_sensor.setDiscoveryConfig("device_class", "presence");
 
     auto kidletime = KIdleTime::instance();
     auto id = kidletime->addIdleTimeout(5 * 60 * 1000);
     connect(kidletime, &KIdleTime::resumingFromIdle, this, [this]() {
-        setState(true);
+        m_sensor.setState(true);
     });
     connect(kidletime, &KIdleTime::timeoutReached, this, [this, id, kidletime](int _id) {
         if (_id != id) {
             return;
         }
-        setState(false);
+        m_sensor.setState(false);
         kidletime->catchNextResumeEvent();
     });
-    setState(true);
+    m_sensor.setState(true);
 }
 
 SuspendSwitch::SuspendSwitch(QObject *parent)
-    : Button(parent)
+    : QObject(parent)
 {
-    setId("suspend");
-    setName("Suspend");
+    m_button.setId("suspend");
+    m_button.setName("Suspend");
 
-    connect(this, &Button::triggered, this, []() {
-        qDebug() << "suspend triggered";
+    connect(&m_button, &Button::triggered, this, []() {
         OrgFreedesktopLogin1ManagerInterface logind(QStringLiteral("org.freedesktop.login1"),
                                                     QStringLiteral("/org/freedesktop/login1"),
                                                     QDBusConnection::systemBus());
@@ -72,13 +70,11 @@ SuspendSwitch::SuspendSwitch(QObject *parent)
 }
 
 LockedState::LockedState(QObject *parent)
-    : Switch(parent)
+    : QObject(parent)
 {
-    setId("locked");
-    setName("Locked");
-    setHaType("switch");
-
-    setDiscoveryConfig("device_class", "lock");
+    m_locked.setId("locked");
+    m_locked.setName("Locked");
+    m_locked.setDiscoveryConfig("device_class", "lock");
 
 
     QDBusConnection::sessionBus().connect(QStringLiteral("org.freedesktop.ScreenSaver"),
@@ -87,7 +83,7 @@ LockedState::LockedState(QObject *parent)
                                           QStringLiteral("ActiveChanged"),
                                           this, SLOT(screenLockedChanged(bool)));
 
-    connect(this, &Switch::stateChangeRequested, this, &LockedState::stateChangeRequested);
+    connect(&m_locked, &Switch::stateChangeRequested, this, &LockedState::stateChangeRequested);
 
     auto isLocked = QDBusMessage::createMethodCall("org.freedesktop.ScreenSaver",
                                    "/ScreenSaver",
@@ -95,13 +91,13 @@ LockedState::LockedState(QObject *parent)
                                    "GetActive");
     auto pendingCall = QDBusConnection::sessionBus().asyncCall(isLocked);
     pendingCall.waitForFinished();
-    bool locked = pendingCall.reply().arguments().at(0).toBool();
-    setState(locked);
+    const bool locked = pendingCall.reply().arguments().at(0).toBool();
+    m_locked.setState(locked);
 }
 
 void LockedState::screenLockedChanged(bool active)
 {
-    setState(active);
+    m_locked.setState(active);
 }
 
 void LockedState::stateChangeRequested(bool state)

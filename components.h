@@ -7,11 +7,13 @@
 
 #include "core.h"
 
-class ActiveSensor: public BinarySensor
+class ActiveSensor: public QObject
 {
     Q_OBJECT
 public:
     ActiveSensor(QObject *parent);
+private:
+    BinarySensor m_sensor;
 };
 
 class Notifications: public Entity
@@ -23,14 +25,16 @@ public:
     void notificationCallback(const QMqttMessage &message);
 };
 
-class SuspendSwitch : public Button
+class SuspendSwitch : public QObject
 {
     Q_OBJECT
 public:
     SuspendSwitch(QObject *parent);
+private:
+    Button m_button;
 };
 
-class LockedState : public Switch
+class LockedState : public QObject
 {
     Q_OBJECT
 public:
@@ -39,6 +43,8 @@ public:
 private Q_SLOTS:
     void screenLockedChanged(bool active);
     void stateChangeRequested(bool state);
+private:
+    Switch m_locked;
 };
 
 
